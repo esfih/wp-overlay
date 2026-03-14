@@ -1,0 +1,15 @@
+<?php
+/**
+ * Plugin Name: {{PLUGIN_NAME}}
+ * Description: {{PLUGIN_DESCRIPTION}}
+ * Version: {{PLUGIN_VERSION}}
+ * Requires at least: {{WP_MIN_VERSION}}
+ * Requires PHP: {{PHP_MIN_VERSION}}
+ * License: GPL-2.0-or-later
+ */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
+
+require_once __DIR__ . '/includes/Core/Autoloader.php';

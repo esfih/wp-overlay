@@ -1,0 +1,12 @@
+=== {{PLUGIN_NAME}} ===
+Contributors: {{CONTRIBUTORS}}
+Requires at least: {{WP_MIN_VERSION}}
+Tested up to: {{WP_TESTED_UP_TO}}
+Requires PHP: {{PHP_MIN_VERSION}}
+Stable tag: {{PLUGIN_VERSION}}
+License: GPLv2 or later
+License URI: https://www.gnu.org/licenses/gpl-2.0.html
+
+== Description ==
+
+{{PLUGIN_DESCRIPTION}}

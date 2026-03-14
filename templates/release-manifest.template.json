@@ -1,0 +1,12 @@
+{
+  "artifacts": [
+    {
+      "name": "customer-plugin",
+      "source": "apps/example-plugin",
+      "plugin_slug": "example-plugin",
+      "bootstrap": "example-plugin.php",
+      "version_source": "bootstrap-header",
+      "build_command": "bash foundation/wp/scripts/build-release-zip.sh --source apps/example-plugin --plugin-slug example-plugin --version 0.1.0 --bootstrap example-plugin.php"
+    }
+  ]
+}
