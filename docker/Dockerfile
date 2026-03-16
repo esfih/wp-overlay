@@ -3,7 +3,8 @@
 # Extends the official WordPress image and adds WP-CLI + useful dev tools.
 ################################################################################
 
-FROM wordpress:php8.1-apache
+ARG WORDPRESS_BASE_IMAGE=wordpress:6.9.4-php8.2-apache
+FROM ${WORDPRESS_BASE_IMAGE}
 
 # ── Install WP-CLI ────────────────────────────────────────────────────────────
 RUN curl -o /usr/local/bin/wp https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
@@ -28,15 +29,9 @@ RUN set -eux; \
             '    Require all granted' \
             '</Directory>' \
             > /etc/apache2/conf-available/wmos-docroot-override.conf; \
-        a2enconf wmos-docroot-override; \
-        printf '%s\n' \
-            'RewriteEngine On' \
-        'RewriteRule ^wp-json/?$ /index.php/wp-json/ [L,QSA]' \
-        'RewriteRule ^wp-json/(.*)$ /index.php/wp-json/$1 [L,QSA]' \
-        'RewriteRule ^/wp-json/?$ /index.php/wp-json/ [L,QSA]' \
-        'RewriteRule ^/wp-json/(.*)$ /index.php/wp-json/$1 [L,QSA]' \
-            > /etc/apache2/conf-available/wmos-rest-fallback.conf; \
-        a2enconf wmos-rest-fallback
+    awk '1; /DocumentRoot \/var\/www\/html/ { print "        RewriteEngine On"; print "        RewriteRule ^wp-json/?$ /index.php/wp-json/ [L,QSA]"; print "        RewriteRule ^wp-json/(.*)$ /index.php/wp-json/$1 [L,QSA]"; print "        RewriteRule ^\/wp-json/?$ /index.php/wp-json/ [L,QSA]"; print "        RewriteRule ^\/wp-json/(.*)$ /index.php/wp-json/$1 [L,QSA]"; }' /etc/apache2/sites-available/000-default.conf > /tmp/000-default.conf; \
+    mv /tmp/000-default.conf /etc/apache2/sites-available/000-default.conf; \
+        a2enconf wmos-docroot-override
 
 # ── Label ─────────────────────────────────────────────────────────────────────
 LABEL org.opencontainers.image.title="WebmasterOS Dev WordPress" \

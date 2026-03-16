@@ -14,6 +14,8 @@ services:
     build:
       context: .
       dockerfile: foundation/wp/docker/Dockerfile
+      args:
+        WORDPRESS_BASE_IMAGE: ${WP_IMAGE:-wordpress:6.9.4-php8.2-apache}
     restart: unless-stopped
     depends_on:
       db:
@@ -32,7 +34,7 @@ services:
     volumes:
       - wp_core:/var/www/html
       - ./${APP_PLUGIN_PATH}:/var/www/html/wp-content/plugins/${APP_PLUGIN_SLUG}:cached
-      - foundation/wp/docker/php-sharedhost.ini:/usr/local/etc/php/conf.d/zz-sharedhost.ini:ro
+      - ./foundation/wp/docker/php-sharedhost.ini:/usr/local/etc/php/conf.d/zz-sharedhost.ini:ro
       - wp_uploads:/var/www/html/wp-content/uploads
 
   phpmyadmin:
@@ -47,7 +49,66 @@ services:
       PMA_USER: ${DB_USER}
       PMA_PASSWORD: ${DB_PASSWORD}
 
+  # Optional second WordPress lane for version-comparison work.
+  # Keep the main sandbox pinned to the current baseline and use this lane
+  # for upcoming core releases, beta testing, or plugin compatibility checks.
+  db_next:
+    image: mysql:8.0
+    restart: unless-stopped
+    profiles: ["dual-version"]
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NEXT_NAME:-wordpress_next}
+      MYSQL_USER: ${DB_NEXT_USER:-wp_user_next}
+      MYSQL_PASSWORD: ${DB_NEXT_PASSWORD:-wp_pass_dev_next}
+    volumes:
+      - db_data_next:/var/lib/mysql
+
+  wordpress_next:
+    build:
+      context: .
+      dockerfile: foundation/wp/docker/Dockerfile
+      args:
+        WORDPRESS_BASE_IMAGE: ${WP_NEXT_IMAGE:-wordpress:beta-7.0-beta5-php8.2-apache}
+    restart: unless-stopped
+    profiles: ["dual-version"]
+    depends_on:
+      db_next:
+        condition: service_healthy
+    ports:
+      - "${WP_NEXT_PORT:-8090}:80"
+    environment:
+      WORDPRESS_DB_HOST: db_next:3306
+      WORDPRESS_DB_NAME: ${DB_NEXT_NAME:-wordpress_next}
+      WORDPRESS_DB_USER: ${DB_NEXT_USER:-wp_user_next}
+      WORDPRESS_DB_PASSWORD: ${DB_NEXT_PASSWORD:-wp_pass_dev_next}
+      WORDPRESS_TABLE_PREFIX: ${DB_NEXT_PREFIX:-wpn_}
+      WORDPRESS_DEBUG: "1"
+      WORDPRESS_DEBUG_LOG: "1"
+      WORDPRESS_DEBUG_DISPLAY: "0"
+    volumes:
+      - wp_core_next:/var/www/html
+      - ./${APP_PLUGIN_PATH}:/var/www/html/wp-content/plugins/${APP_PLUGIN_SLUG}:cached
+      - ./foundation/wp/docker/php-sharedhost.ini:/usr/local/etc/php/conf.d/zz-sharedhost.ini:ro
+      - wp_uploads_next:/var/www/html/wp-content/uploads
+
+  phpmyadmin_next:
+    image: phpmyadmin:latest
+    restart: unless-stopped
+    profiles: ["dual-version"]
+    depends_on:
+      - db_next
+    ports:
+      - "${PMA_NEXT_PORT:-8091}:80"
+    environment:
+      PMA_HOST: db_next
+      PMA_USER: ${DB_NEXT_USER:-wp_user_next}
+      PMA_PASSWORD: ${DB_NEXT_PASSWORD:-wp_pass_dev_next}
+
 volumes:
   db_data:
   wp_core:
   wp_uploads:
+  db_data_next:
+  wp_core_next:
+  wp_uploads_next:
