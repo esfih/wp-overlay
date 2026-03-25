@@ -1,0 +1,178 @@
+<?php
+/**
+ * Resolves feature allowance limits from billing-site product metadata.
+ *
+ * Reads the `wmos_allowances_v1` custom meta key from the FluentCart product.
+ * Falls back to FluentCart's native `license_settings` meta if allowances_v1 is absent.
+ *
+ * HOW TO SET THE META:
+ * In the billing WP admin or via WP CLI:
+ *   wp post meta update <product_post_id> wmos_allowances_v1 '{"ai_credits_monthly":500,"max_site_activations":1}' --format=json
+ *
+ * Or use the check-data-source-baseline.sh script from this repo foundation.
+ *
+ * TOKENS: {{CP_PHP_NAMESPACE}}
+ */
+
+declare(strict_types=1);
+
+namespace {{CP_PHP_NAMESPACE}}\Modules\Licensing;
+
+defined( 'ABSPATH' ) || exit;
+
+final class BillingAllowanceRepository {
+
+    /**
+     * Primary allowances meta key — set this on each FluentCart product.
+     * Value: serialized/JSON array with your feature limits.
+     */
+    private const META_KEY_ALLOWANCES      = 'wmos_allowances_v1';
+    private const META_KEY_LICENSE_SETTINGS = 'license_settings';
+
+    /**
+     * @return array<string, int|string>   Empty if product not configured.
+     */
+    public function resolve_limits( int $product_id, int $variation_id = 0 ): array {
+        if ( $product_id <= 0 ) {
+            return [];
+        }
+
+        // Try primary allowances meta first.
+        $payload = $this->read_product_meta_payload( $product_id, self::META_KEY_ALLOWANCES );
+        if ( $payload !== [] ) {
+            $limits = $this->extract_limits_from_payload( $payload, $variation_id );
+            if ( $limits !== [] ) {
+                return $limits;
+            }
+        }
+
+        // Fallback: read from FluentCart's own license_settings meta.
+        $settings = $this->read_product_meta_payload( $product_id, self::META_KEY_LICENSE_SETTINGS );
+        if ( $settings !== [] ) {
+            $limits = $this->extract_limits_from_license_settings( $settings, $variation_id );
+            if ( $limits !== [] ) {
+                return $limits;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function read_product_meta_payload( int $product_id, string $meta_key ): array {
+        global $wpdb;
+        if ( ! isset( $wpdb ) ) {
+            return [];
+        }
+
+        $table = $this->resolve_product_meta_table( $wpdb );
+        if ( $table === '' ) {
+            return [];
+        }
+
+        // FluentCart may map its product IDs to different post IDs; try both.
+        foreach ( $this->resolve_product_meta_candidate_ids( $wpdb, $product_id ) as $candidate_id ) {
+            $sql = $wpdb->prepare(
+                // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+                'SELECT meta_value FROM `' . $table . '` WHERE object_id = %d AND meta_key = %s LIMIT 1',
+                $candidate_id,
+                $meta_key
+            );
+            $raw = $wpdb->get_var( $sql );
+            if ( ! is_string( $raw ) || trim( $raw ) === '' ) {
+                continue;
+            }
+            $decoded = maybe_unserialize( $raw );
+            if ( is_array( $decoded ) ) {
+                return $decoded;
+            }
+            $json = json_decode( $raw, true );
+            if ( is_array( $json ) ) {
+                return $json;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Extract limits from wmos_allowances_v1 payload.
+     * Supports top-level keys and variation_overrides nested block.
+     *
+     * @param array<string, mixed> $payload
+     * @return array<string, int|string>
+     */
+    private function extract_limits_from_payload( array $payload, int $variation_id ): array {
+        // Apply variation-specific override if present.
+        $overrides = (array) ( $payload['variation_overrides'][ (string) $variation_id ] ?? [] );
+        $merged    = array_merge( $payload, $overrides );
+
+        // Remove structural keys — keep only limit scalars.
+        unset( $merged['variation_overrides'] );
+
+        $limits = [];
+        foreach ( $merged as $key => $value ) {
+            if ( is_scalar( $value ) ) {
+                $limits[ $key ] = $value;
+            } elseif ( is_array( $value ) ) {
+                // Nested arrays (e.g. feature_flags) kept as-is.
+                $limits[ $key ] = $value;
+            }
+        }
+
+        return $limits;
+    }
+
+    /**
+     * Fallback: extract activation limit from FluentCart's native license_settings.
+     *
+     * @param array<string, mixed> $settings
+     * @return array<string, int|string>
+     */
+    private function extract_limits_from_license_settings( array $settings, int $variation_id ): array {
+        // FluentCart stores activation_limit directly or per-variation.
+        $limit = (int) ( $settings['activation_limit'] ?? $settings['activations_limit'] ?? 0 );
+        if ( $limit > 0 ) {
+            return [ 'max_site_activations' => $limit ];
+        }
+        return [];
+    }
+
+    private function resolve_product_meta_table( $wpdb ): string {
+        $prefix = (string) $wpdb->prefix;
+        // FluentCart uses its own meta table; try several known patterns.
+        $candidates = [
+            $prefix . 'fluentcart_product_meta',
+            $prefix . 'fc_product_meta',
+            $prefix . 'postmeta',  // some versions store in standard postmeta
+        ];
+        foreach ( $candidates as $table ) {
+            if ( (string) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table ) {
+                return $table;
+            }
+        }
+        return '';
+    }
+
+    /**
+     * @return int[]
+     */
+    private function resolve_product_meta_candidate_ids( $wpdb, int $product_id ): array {
+        // Return the given ID plus any post_id that FluentCart maps it to.
+        $ids = [ $product_id ];
+        // Try to find a FluentCart products table for post_id lookup.
+        $prefix  = (string) $wpdb->prefix;
+        $fc_table = $prefix . 'fluentcart_products';
+        if ( (string) $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $fc_table ) ) === $fc_table ) {
+            $post_id = (int) $wpdb->get_var(
+                $wpdb->prepare( 'SELECT post_id FROM `' . $fc_table . '` WHERE id = %d LIMIT 1', $product_id )
+            );
+            if ( $post_id > 0 && $post_id !== $product_id ) {
+                $ids[] = $post_id;
+            }
+        }
+        return $ids;
+    }
+}

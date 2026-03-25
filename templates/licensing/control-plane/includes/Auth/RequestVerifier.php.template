@@ -1,0 +1,53 @@
+<?php
+/**
+ * Ops telemetry and error logging for the control-plane.
+ *
+ * No shared-secret auth logic here — all auth is done directly in endpoints
+ * using site_token + hash_equals(). This class is purely for operational visibility.
+ *
+ * TOKENS: {{CP_PHP_NAMESPACE}}, {{CP_OPTION_PREFIX}}
+ */
+
+declare(strict_types=1);
+
+namespace {{CP_PHP_NAMESPACE}}\Auth;
+
+defined( 'ABSPATH' ) || exit;
+
+final class RequestVerifier {
+
+    public const OPTION_FAILED_AUTH_COUNT = '{{CP_OPTION_PREFIX}}_failed_auth_count';
+    public const OPTION_FAILED_AUTH_LOG   = '{{CP_OPTION_PREFIX}}_failed_auth_log';
+    public const OPTION_OPS_ERROR_LOG     = '{{CP_OPTION_PREFIX}}_ops_error_log';
+
+    /**
+     * @return array<string, mixed>
+     */
+    public static function get_ops_telemetry(): array {
+        return [
+            'failed_auth_count' => (int) get_option( self::OPTION_FAILED_AUTH_COUNT, 0 ),
+            'failed_auth_log'   => array_values( (array) get_option( self::OPTION_FAILED_AUTH_LOG, [] ) ),
+            'ops_error_log'     => array_values( (array) get_option( self::OPTION_OPS_ERROR_LOG, [] ) ),
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $context
+     */
+    public static function log_ops_error( string $code, array $context = [] ): void {
+        $log = (array) get_option( self::OPTION_OPS_ERROR_LOG, [] );
+
+        $log[] = [
+            'at'      => gmdate( 'c' ),
+            'code'    => sanitize_key( $code ),
+            'context' => $context,
+        ];
+
+        // Rotate — keep last 100 entries.
+        if ( count( $log ) > 100 ) {
+            $log = array_slice( $log, -100 );
+        }
+
+        update_option( self::OPTION_OPS_ERROR_LOG, $log, false );
+    }
+}

@@ -1,0 +1,33 @@
+<?php
+/**
+ * Plugin Name:  {{CP_PLUGIN_NAME}}
+ * Description:  Control-plane REST API for {{PRODUCT_NAME}} billing and licensing.
+ * Version:      {{CP_PLUGIN_VERSION}}
+ * Requires at least: 6.4
+ * Requires PHP: 8.0
+ * License: Proprietary
+ *
+ * TOKENS TO REPLACE:
+ *   {{CP_PLUGIN_NAME}}       - Human-readable plugin name, e.g. "Acme Control Plane"
+ *   {{CP_PLUGIN_SLUG}}       - Slug used in REST namespace, e.g. "acme-control-plane"
+ *   {{CP_PLUGIN_VERSION}}    - e.g. "1.0.0"
+ *   {{CP_PHP_NAMESPACE}}     - Root PHP namespace, e.g. "AcmeControlPlane"
+ *   {{CP_OPTION_PREFIX}}     - WP options prefix, e.g. "acme_cp"
+ *   {{CP_VERSION_CONSTANT}}  - PHP constant for version, e.g. "ACME_CP_VERSION"
+ *   {{CP_DEV_CONSTANT}}      - Constant for dev/debug mode, e.g. "ACME_LICENSE_DEV_UI"
+ *   {{PRODUCT_NAME}}         - e.g. "Acme SaaS"
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+define( '{{CP_VERSION_CONSTANT}}', '{{CP_PLUGIN_VERSION}}' );
+
+require_once __DIR__ . '/includes/Core/Autoloader.php';
+
+( new {{CP_PHP_NAMESPACE}}\Core\Autoloader( __DIR__ . '/includes', '{{CP_PHP_NAMESPACE}}' ) )->register();
+
+add_action( 'plugins_loaded', static function (): void {
+    ( new {{CP_PHP_NAMESPACE}}\Core\Plugin() )->boot();
+} );

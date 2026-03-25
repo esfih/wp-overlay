@@ -1,0 +1,160 @@
+<?php
+/**
+ * Option-backed storage for licensing state on the customer plugin side.
+ *
+ * Stores the activation credentials and cached entitlement contract.
+ * LicenseApiClient reads from and writes to this class.
+ *
+ * SECURITY: The billing site URL is hardcoded as a private constant.
+ * There is intentionally NO admin UI to override it. This prevents
+ * customers from redirecting license checks to a rogue server.
+ *
+ * TOKENS TO REPLACE:
+ *   {{CUSTOMER_PHP_NAMESPACE}}       - e.g. "MyPlugin\Licensing"
+ *   {{CUSTOMER_OPTION_PREFIX}}       - e.g. "myplugin_license"
+ *   {{CUSTOMER_CP_OPTION_PREFIX}}    - e.g. "myplugin_cp"
+ *   {{BILLING_CP_URL}}               - e.g. "https://yoursite.com/wp-json/yourslug-control-plane/v1/"
+ *   {{CUSTOMER_VERSION_CONSTANT}}    - e.g. "MYPLUGIN_VERSION"
+ */
+
+namespace {{CUSTOMER_PHP_NAMESPACE}};
+
+defined( 'ABSPATH' ) || exit;
+
+final class LicenseStateStore {
+
+    /**
+     * Billing site control-plane URL — HARDCODED, no admin override.
+     * Change this when deploying to a different billing site.
+     */
+    private const BILLING_CP_URL = '{{BILLING_CP_URL}}';
+
+    // ── Persistent WP option keys ────────────────────────────────────────────
+
+    /** User-entered license key */
+    public const OPTION_LICENSE_KEY                = '{{CUSTOMER_OPTION_PREFIX}}_key';
+    /** Cached entitlement contract from last successful resolve */
+    public const OPTION_ENTITLEMENT                = '{{CUSTOMER_OPTION_PREFIX}}_entitlement';
+    /** ISO timestamp of last successful entitlement sync */
+    public const OPTION_LAST_SYNC                  = '{{CUSTOMER_OPTION_PREFIX}}_last_sync';
+    /** Human-readable error from last failed sync */
+    public const OPTION_LAST_ERROR                 = '{{CUSTOMER_OPTION_PREFIX}}_last_error';
+    /** activation_id returned by /activations */
+    public const OPTION_ACTIVATION_ID              = '{{CUSTOMER_CP_OPTION_PREFIX}}_activation_id';
+    /** site_token returned by /activations — used as bearer credential */
+    public const OPTION_SITE_TOKEN                 = '{{CUSTOMER_CP_OPTION_PREFIX}}_site_token';
+    /** First4...Last4 of the license key bound to current activation — used to detect key change */
+    public const OPTION_ACTIVATION_LICENSE_REF     = '{{CUSTOMER_CP_OPTION_PREFIX}}_activation_license_ref';
+    /** Debug event log (dev mode only) */
+    public const OPTION_CP_DEBUG_EVENTS            = '{{CUSTOMER_CP_OPTION_PREFIX}}_debug_events';
+
+    // ── Sanitization ─────────────────────────────────────────────────────────
+
+    public static function sanitize_license_key( string $value ): string {
+        return strtoupper( sanitize_text_field( $value ) );
+    }
+
+    // ── Billing URL (hardcoded) ───────────────────────────────────────────────
+
+    public function get_control_plane_base_url(): string {
+        return self::BILLING_CP_URL;
+    }
+
+    // ── License key ──────────────────────────────────────────────────────────
+
+    public function get_license_key(): string {
+        return (string) get_option( self::OPTION_LICENSE_KEY, '' );
+    }
+
+    public function set_license_key( string $value ): void {
+        update_option( self::OPTION_LICENSE_KEY, self::sanitize_license_key( $value ), false );
+    }
+
+    // ── Entitlement contract ──────────────────────────────────────────────────
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function get_cached_entitlement(): array {
+        $value = get_option( self::OPTION_ENTITLEMENT, [] );
+        return is_array( $value ) ? $value : [];
+    }
+
+    /**
+     * @param array<string, mixed> $value
+     */
+    public function set_cached_entitlement( array $value ): void {
+        update_option( self::OPTION_ENTITLEMENT, $value, false );
+    }
+
+    // ── Sync metadata ─────────────────────────────────────────────────────────
+
+    public function get_last_sync(): string {
+        return (string) get_option( self::OPTION_LAST_SYNC, '' );
+    }
+
+    public function set_last_sync( string $value ): void {
+        update_option( self::OPTION_LAST_SYNC, sanitize_text_field( $value ), false );
+    }
+
+    public function get_last_error(): string {
+        return (string) get_option( self::OPTION_LAST_ERROR, '' );
+    }
+
+    public function set_last_error( string $value ): void {
+        update_option( self::OPTION_LAST_ERROR, sanitize_text_field( $value ), false );
+    }
+
+    // ── Activation credentials ────────────────────────────────────────────────
+
+    public function get_activation_id(): string {
+        return (string) get_option( self::OPTION_ACTIVATION_ID, '' );
+    }
+
+    public function set_activation_id( string $value ): void {
+        update_option( self::OPTION_ACTIVATION_ID, sanitize_text_field( $value ), false );
+    }
+
+    public function get_site_token(): string {
+        return (string) get_option( self::OPTION_SITE_TOKEN, '' );
+    }
+
+    public function set_site_token( string $value ): void {
+        update_option( self::OPTION_SITE_TOKEN, sanitize_text_field( $value ), false );
+    }
+
+    public function get_activation_license_ref(): string {
+        return (string) get_option( self::OPTION_ACTIVATION_LICENSE_REF, '' );
+    }
+
+    public function set_activation_license_ref( string $value ): void {
+        update_option( self::OPTION_ACTIVATION_LICENSE_REF, sanitize_text_field( $value ), false );
+    }
+
+    // ── State management ──────────────────────────────────────────────────────
+
+    /**
+     * Clear all remote-state options. Called when license key changes or on manual deactivation.
+     */
+    public function clear_remote_state(): void {
+        delete_option( self::OPTION_ACTIVATION_ID );
+        delete_option( self::OPTION_SITE_TOKEN );
+        delete_option( self::OPTION_ACTIVATION_LICENSE_REF );
+        delete_option( self::OPTION_ENTITLEMENT );
+        delete_option( self::OPTION_LAST_SYNC );
+    }
+
+    /**
+     * Quick check for the most common feature gate pattern:
+     * if ( $store->is_plan_at_least('solo') ) { ... }
+     */
+    public function get_plan_slug(): string {
+        $entitlement = $this->get_cached_entitlement();
+        return (string) ( $entitlement['plan_slug'] ?? 'free' );
+    }
+
+    public function is_active(): bool {
+        $entitlement = $this->get_cached_entitlement();
+        return ( $entitlement['status'] ?? '' ) === 'active';
+    }
+}

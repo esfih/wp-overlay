@@ -1,0 +1,62 @@
+<?php
+/**
+ * Option-backed activation storage.
+ *
+ * Phase 1: stores all activations in a single WP option as an associative array
+ * keyed by activation_id. Suitable for hundreds of activations.
+ *
+ * Phase 2 upgrade path: replace with a custom DB table.
+ *   CREATE TABLE {prefix}{{CP_OPTION_PREFIX}}_activations (
+ *     activation_id  VARCHAR(30) NOT NULL PRIMARY KEY,
+ *     site_token     VARCHAR(40) NOT NULL,
+ *     license_key    VARCHAR(100) NOT NULL,
+ *     ...
+ *     created_at     DATETIME NOT NULL,
+ *     INDEX idx_license_key (license_key)
+ *   );
+ *
+ * TOKENS: {{CP_PHP_NAMESPACE}}, {{CP_OPTION_PREFIX}}
+ */
+
+declare(strict_types=1);
+
+namespace {{CP_PHP_NAMESPACE}}\Modules\Licensing;
+
+defined( 'ABSPATH' ) || exit;
+
+final class ActivationRepository {
+
+    private const OPTION_ACTIVATIONS = '{{CP_OPTION_PREFIX}}_activations';
+
+    /**
+     * @return array<string, array<string, mixed>>
+     */
+    public function all(): array {
+        $value = get_option( self::OPTION_ACTIVATIONS, [] );
+        return is_array( $value ) ? $value : [];
+    }
+
+    /**
+     * @param array<string, mixed> $activation
+     */
+    public function save( string $activation_id, array $activation ): void {
+        $all                    = $this->all();
+        $all[ $activation_id ] = $activation;
+        update_option( self::OPTION_ACTIVATIONS, $all, false );
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function find( string $activation_id ): array {
+        $all = $this->all();
+        $hit = $all[ $activation_id ] ?? [];
+        return is_array( $hit ) ? $hit : [];
+    }
+
+    public function delete( string $activation_id ): void {
+        $all = $this->all();
+        unset( $all[ $activation_id ] );
+        update_option( self::OPTION_ACTIVATIONS, $all, false );
+    }
+}

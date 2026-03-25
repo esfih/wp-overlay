@@ -1,0 +1,317 @@
+<?php
+/**
+ * Resolves paid plan by reading FluentCart native license DB tables directly.
+ *
+ * WHY NATIVE DB ACCESS:
+ * FluentCart Pro does not expose a PHP API for license key lookup. This class
+ * discovers the relevant table by pattern-matching table names (fluentcart + license/key),
+ * then queries it with a prepared statement.
+ *
+ * HOW TO DISCOVER product_id / variation_id:
+ * Enable dev mode ({{CP_DEV_CONSTANT}} = true) and call debug_probe() with a known
+ * license key. This returns table name, product_id, variation_id, and activation limit
+ * without actually creating an activation.
+ *
+ * HOW RESOLUTION WORKS (priority order):
+ * 1. Find FluentCart license/key table by name pattern
+ * 2. Query by license key column (license_key, key_code, activation_key, serial)
+ * 3. Extract product_id + variation_id from matching row
+ * 4. PlanRegistry::resolve_from_product_reference() maps to plan slug
+ * 5. Fallback: use plan hint column (plan, plan_slug) from same row
+ * 6. Fallback: treat any FluentCart row match as 'paid'
+ *
+ * TOKENS: {{CP_PHP_NAMESPACE}}, {{CP_DEV_CONSTANT}}
+ */
+
+declare(strict_types=1);
+
+namespace {{CP_PHP_NAMESPACE}}\Modules\Licensing;
+
+defined( 'ABSPATH' ) || exit;
+
+final class FluentCartNativeResolver {
+
+    /**
+     * Primary entry point: resolve plan from license key.
+     *
+     * @return array<string, mixed>   Empty if no match. Keys: plan, product_id, variation_id, max_site_activations.
+     */
+    public static function resolve_from_license_key( string $license_key ): array {
+        global $wpdb;
+        if ( ! isset( $wpdb ) || ! is_object( $wpdb ) ) {
+            return [];
+        }
+
+        $key = strtoupper( trim( $license_key ) );
+        if ( $key === '' ) {
+            return [];
+        }
+
+        $tables = self::candidate_tables( $wpdb );
+        foreach ( $tables as $table ) {
+            $columns     = self::table_columns( $wpdb, $table );
+            $key_columns = self::key_columns( $columns );
+            if ( $key_columns === [] ) {
+                continue;
+            }
+
+            $row = self::find_license_row( $wpdb, $table, $key_columns, $key );
+            if ( ! is_array( $row ) || $row === [] ) {
+                continue;
+            }
+
+            $product_id   = self::first_int( $row, [ 'product_id', 'fluentcart_product_id', 'item_id' ] );
+            $variation_id = self::first_int( $row, [ 'variation_id', 'variant_id' ] );
+            $limit        = self::first_int( $row, [ 'limit', 'activation_limit', 'max_activations', 'activations_limit' ] );
+
+            // Try PlanRegistry first (most reliable).
+            if ( $product_id > 0 ) {
+                $mapped = PlanRegistry::resolve_from_product_reference( $product_id, $variation_id );
+                if ( $mapped !== [] ) {
+                    if ( $variation_id > 0 ) {
+                        $mapped['variation_id'] = $variation_id;
+                    }
+                    if ( $limit > 0 ) {
+                        $mapped['max_site_activations'] = $limit;
+                    }
+                    return $mapped;
+                }
+            }
+
+            // Fallback: plan hint column.
+            $hint = self::first_text( $row, [ 'plan', 'plan_slug', 'product_slug', 'product_name', 'item_name', 'title' ] );
+            if ( $hint !== '' ) {
+                $hint_map = self::map_from_hint( $hint );
+                if ( $hint_map !== [] ) {
+                    if ( $product_id > 0 ) {
+                        $hint_map['product_id'] = $product_id;
+                    }
+                    if ( $variation_id > 0 ) {
+                        $hint_map['variation_id'] = $variation_id;
+                    }
+                    if ( $limit > 0 ) {
+                        $hint_map['max_site_activations'] = $limit;
+                    }
+                    return $hint_map;
+                }
+            }
+
+            // Final fallback: any FluentCart license row = paid.
+            if ( $product_id > 0 ) {
+                return [
+                    'plan'                 => 'paid',
+                    'product_id'           => $product_id,
+                    'variation_id'         => max( 0, $variation_id ),
+                    'max_site_activations' => max( 1, $limit > 0 ? $limit : 1 ),
+                ];
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * Debug probe — returns discovery details without creating an activation.
+     * Only call this when dev mode is enabled.
+     *
+     * @return array<string, mixed>
+     */
+    public static function debug_probe( string $license_key ): array {
+        global $wpdb;
+
+        $result = [
+            'candidate_tables'         => 0,
+            'tables_with_key_column'   => 0,
+            'matched_table'            => '',
+            'matched_product_id'       => 0,
+            'matched_variation_id'     => 0,
+            'matched_activation_limit' => 0,
+            'match_mode'               => '',
+            'mapped_plan'              => '',
+        ];
+
+        if ( ! isset( $wpdb ) || ! is_object( $wpdb ) ) {
+            return $result;
+        }
+
+        $key = strtoupper( trim( $license_key ) );
+        if ( $key === '' ) {
+            return $result;
+        }
+
+        $tables                     = self::candidate_tables( $wpdb );
+        $result['candidate_tables'] = count( $tables );
+
+        foreach ( $tables as $table ) {
+            $columns     = self::table_columns( $wpdb, $table );
+            $key_columns = self::key_columns( $columns );
+            if ( $key_columns === [] ) {
+                continue;
+            }
+            ++$result['tables_with_key_column'];
+
+            $row = self::find_license_row( $wpdb, $table, $key_columns, $key );
+            if ( ! is_array( $row ) || $row === [] ) {
+                continue;
+            }
+
+            $product_id   = self::first_int( $row, [ 'product_id', 'fluentcart_product_id', 'item_id' ] );
+            $variation_id = self::first_int( $row, [ 'variation_id', 'variant_id' ] );
+            $limit        = self::first_int( $row, [ 'limit', 'activation_limit', 'max_activations', 'activations_limit' ] );
+
+            $result['matched_table']             = $table;
+            $result['matched_product_id']        = $product_id;
+            $result['matched_variation_id']      = $variation_id;
+            $result['matched_activation_limit']  = $limit;
+            $result['match_mode']                = 'exact_key_column';
+
+            $mapped = $product_id > 0 ? PlanRegistry::resolve_from_product_reference( $product_id, $variation_id ) : [];
+            if ( $mapped !== [] ) {
+                $result['mapped_plan'] = (string) ( $mapped['plan'] ?? '' );
+            }
+            return $result;
+        }
+
+        return $result;
+    }
+
+    // ── Private helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Find FluentCart tables that contain license/key data.
+     *
+     * @return string[]
+     */
+    private static function candidate_tables( $wpdb ): array {
+        $prefix = (string) $wpdb->prefix;
+        $like   = $wpdb->esc_like( $prefix ) . '%';
+        $all    = $wpdb->get_col( $wpdb->prepare( 'SHOW TABLES LIKE %s', $like ) );
+        if ( ! is_array( $all ) ) {
+            return [];
+        }
+
+        $candidates = [];
+        foreach ( $all as $table ) {
+            $name = strtolower( (string) $table );
+            // Must look like a FluentCart table.
+            $is_fc = strpos( $name, 'fluentcart' ) !== false
+                  || strpos( $name, 'fluent_cart' ) !== false
+                  || strpos( $name, 'flc' ) !== false
+                  || strpos( $name, 'fct_' ) !== false;
+            if ( ! $is_fc ) {
+                continue;
+            }
+            // Must look like it contains license keys.
+            $has_key = strpos( $name, 'license' ) !== false
+                    || strpos( $name, 'licence' ) !== false
+                    || strpos( $name, 'key' ) !== false
+                    || strpos( $name, 'item' ) !== false
+                    || strpos( $name, 'subscription' ) !== false
+                    || strpos( $name, 'order' ) !== false
+                    || strpos( $name, 'purchase' ) !== false;
+            if ( ! $has_key ) {
+                continue;
+            }
+            $candidates[] = (string) $table;
+        }
+        return $candidates;
+    }
+
+    /**
+     * @return string[]
+     */
+    private static function table_columns( $wpdb, string $table ): array {
+        $rows = $wpdb->get_results( 'SHOW COLUMNS FROM `' . esc_sql( $table ) . '`', ARRAY_A );
+        if ( ! is_array( $rows ) ) {
+            return [];
+        }
+        return array_column( $rows, 'Field' );
+    }
+
+    /**
+     * Find columns that likely hold license keys.
+     *
+     * @param  string[] $columns
+     * @return string[]
+     */
+    private static function key_columns( array $columns ): array {
+        $key_names = [ 'license_key', 'key_code', 'activation_key', 'serial', 'license_code', 'license', 'key' ];
+        return array_values( array_filter( $columns, function ( $col ) use ( $key_names ) {
+            return in_array( strtolower( (string) $col ), $key_names, true );
+        } ) );
+    }
+
+    /**
+     * @param  string[]            $key_columns
+     * @return array<string,mixed>
+     */
+    private static function find_license_row( $wpdb, string $table, array $key_columns, string $key ): array {
+        foreach ( $key_columns as $col ) {
+            $sql = $wpdb->prepare(
+                // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+                'SELECT * FROM `' . esc_sql( $table ) . '` WHERE `' . esc_sql( $col ) . '` = %s LIMIT 1',
+                $key
+            );
+            $row = $wpdb->get_row( $sql, ARRAY_A );
+            if ( is_array( $row ) && $row !== [] ) {
+                return $row;
+            }
+        }
+        return [];
+    }
+
+    /**
+     * @param array<string,mixed> $row
+     * @param string[]            $candidates
+     */
+    private static function first_int( array $row, array $candidates ): int {
+        foreach ( $candidates as $key ) {
+            if ( isset( $row[ $key ] ) && is_numeric( $row[ $key ] ) ) {
+                return (int) $row[ $key ];
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * @param array<string,mixed> $row
+     * @param string[]            $candidates
+     */
+    private static function first_text( array $row, array $candidates ): string {
+        foreach ( $candidates as $key ) {
+            if ( isset( $row[ $key ] ) && is_string( $row[ $key ] ) && trim( $row[ $key ] ) !== '' ) {
+                return strtolower( trim( (string) $row[ $key ] ) );
+            }
+        }
+        return '';
+    }
+
+    /**
+     * @return array<string,mixed>
+     */
+    private static function map_from_hint( string $hint ): array {
+        // EDIT: add your own plan name patterns here.
+        $map = [
+            'agency'   => 'agency',
+            'maestro'  => 'maestro',
+            'solo'     => 'solo',
+            'paid'     => 'paid',
+            'premium'  => 'paid',
+            'pro'      => 'paid',
+            'business' => 'agency',
+            'team'     => 'maestro',
+            'starter'  => 'solo',
+        ];
+
+        foreach ( $map as $pattern => $plan ) {
+            if ( strpos( $hint, $pattern ) !== false ) {
+                return [
+                    'plan'         => $plan,
+                    'product_id'   => 0,
+                    'variation_id' => 0,
+                ];
+            }
+        }
+        return [];
+    }
+}

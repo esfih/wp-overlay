@@ -1,0 +1,137 @@
+<?php
+/**
+ * Resolves the current entitlement contract for an active site activation.
+ *
+ * Auth: site_token (bearer) in X-{{CP_SITE_TOKEN_HEADER}} header + site_fingerprint match.
+ * No HMAC. site_token is compared with hash_equals() (constant-time, timing-safe).
+ *
+ * TOKENS: {{CP_PHP_NAMESPACE}}, {{CP_SITE_TOKEN_HEADER}} (e.g. "X-WMOS-Site-Token")
+ */
+
+declare(strict_types=1);
+
+namespace {{CP_PHP_NAMESPACE}}\API\Endpoints;
+
+use {{CP_PHP_NAMESPACE}}\Auth\RequestVerifier;
+use {{CP_PHP_NAMESPACE}}\Modules\Licensing\ActivationRepository;
+use {{CP_PHP_NAMESPACE}}\Modules\Licensing\BillingAllowanceRepository;
+use {{CP_PHP_NAMESPACE}}\Modules\Licensing\PlanRegistry;
+
+defined( 'ABSPATH' ) || exit;
+
+final class EntitlementResolveEndpoint {
+
+    public function route_definition(): array {
+        return [
+            'methods'             => \WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'handle' ],
+            'permission_callback' => [ $this, 'can_access' ],
+            'args'                => [
+                'activation_id'    => [ 'required' => true,  'type' => 'string' ],
+                'site_fingerprint' => [ 'required' => true,  'type' => 'string' ],
+                'plugin_version'   => [ 'required' => false, 'type' => 'string' ],
+                'reason'           => [ 'required' => false, 'type' => 'string', 'default' => 'sync' ],
+            ],
+        ];
+    }
+
+    public function can_access( \WP_REST_Request $request ): bool {
+        return true; // Auth enforced in handle()
+    }
+
+    public function handle( \WP_REST_Request $request ): \WP_REST_Response {
+        $activation_id = trim( (string) $request->get_param( 'activation_id' ) );
+        $fingerprint   = strtoupper( trim( (string) $request->get_param( 'site_fingerprint' ) ) );
+
+        // Bearer token from header — replace header name token if different.
+        $site_token = trim( (string) $request->get_header( '{{CP_SITE_TOKEN_HEADER_PHP}}' ) );
+        // e.g. 'x_wmos_site_token'  ← WP lowercases and replaces hyphens with underscores in header names
+
+        $repo       = new ActivationRepository();
+        $activation = $repo->find( $activation_id );
+
+        if ( $activation === [] ) {
+            RequestVerifier::log_ops_error( 'activation_not_found', [
+                'activation_id' => $activation_id,
+                'route'         => '/entitlements/resolve',
+            ] );
+            return new \WP_REST_Response(
+                [ 'success' => false, 'data' => [ 'status' => 'invalid' ], 'error' => 'Activation not found.' ],
+                404
+            );
+        }
+
+        // Fingerprint check — binds activation to the site it was created on.
+        if ( (string) ( $activation['site_fingerprint'] ?? '' ) !== $fingerprint ) {
+            RequestVerifier::log_ops_error( 'fingerprint_mismatch', [
+                'activation_id' => $activation_id,
+                'route'         => '/entitlements/resolve',
+            ] );
+            return new \WP_REST_Response(
+                [ 'success' => false, 'data' => [ 'status' => 'invalid' ], 'error' => 'Site fingerprint mismatch.' ],
+                403
+            );
+        }
+
+        // Constant-time token validation.
+        if ( $site_token === '' || ! hash_equals( (string) ( $activation['site_token'] ?? '' ), $site_token ) ) {
+            RequestVerifier::log_ops_error( 'site_token_invalid', [
+                'activation_id' => $activation_id,
+                'route'         => '/entitlements/resolve',
+            ] );
+            return new \WP_REST_Response(
+                [ 'success' => false, 'data' => [ 'status' => 'invalid' ], 'error' => 'Missing or invalid site token.' ],
+                403
+            );
+        }
+
+        // Resolve allowances from billing product metadata.
+        $product_id   = (int) ( $activation['product_id'] ?? 0 );
+        $variation_id = (int) ( $activation['variation_id'] ?? 0 );
+        $allowances   = ( new BillingAllowanceRepository() )->resolve_limits( $product_id, $variation_id );
+
+        if ( $allowances === [] ) {
+            RequestVerifier::log_ops_error( 'missing_billing_allowances', [
+                'route'         => '/entitlements/resolve',
+                'activation_id' => $activation_id,
+                'product_id'    => $product_id,
+                'variation_id'  => $variation_id,
+                'meta_key'      => 'wmos_allowances_v1',
+            ] );
+            return new \WP_REST_Response(
+                [
+                    'success' => false,
+                    'data'    => [ 'status' => 'billing_data_missing' ],
+                    'error'   => 'Billing allowances missing for this product/variation. Configure wmos_allowances_v1 product meta on the billing site.',
+                    'code'    => 'missing_billing_allowances',
+                ],
+                424
+            );
+        }
+
+        $max_act   = max( 1, (int) ( $activation['max_site_activations'] ?? 1 ) );
+        $used      = 1; // Phase 1: one activation record = one active site
+        $remaining = max( 0, $max_act - $used );
+
+        $plan = (string) ( $activation['plan'] ?? 'paid' );
+
+        // Build canonical entitlement contract.
+        $contract = [
+            'status'         => 'active',
+            'plan'           => $plan,
+            'limits'         => $allowances,
+            'activation_policy' => [
+                'max_activations'       => $max_act,
+                'used_activations'      => $used,
+                'remaining_activations' => $remaining,
+            ],
+            // Add a contract hash so customer plugin can detect stale cache.
+            'contract_signature' => hash( 'sha256', $plan . ':' . wp_json_encode( $allowances ) ),
+        ];
+
+        return new \WP_REST_Response(
+            [ 'success' => true, 'data' => $contract, 'error' => null ],
+            200
+        );
+    }
+}

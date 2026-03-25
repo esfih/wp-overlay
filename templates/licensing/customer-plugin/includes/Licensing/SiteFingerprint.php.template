@@ -1,0 +1,42 @@
+<?php
+/**
+ * Stable site fingerprint — bound to the activation at creation time.
+ *
+ * The fingerprint is a 16-char uppercase hex string derived from the site's URLs.
+ * It is recomputed on every API call and compared against the stored value.
+ * A mismatch causes the control-plane to reject the request (403).
+ *
+ * This prevents activation tokens from being replayed on a different site.
+ *
+ * TOKENS: {{CUSTOMER_PHP_NAMESPACE}}
+ */
+
+namespace {{CUSTOMER_PHP_NAMESPACE}};
+
+defined( 'ABSPATH' ) || exit;
+
+final class SiteFingerprint {
+
+    public static function generate(): string {
+        $parts = [
+            network_home_url( '/' ),
+            home_url( '/' ),
+            site_url( '/' ),
+            (string) get_current_blog_id(),
+        ];
+
+        return strtoupper( substr( hash( 'sha256', implode( '|', $parts ) ), 0, 16 ) );
+    }
+
+    /**
+     * @return array<string, mixed>   Diagnostic summary for admin UI / debug trace.
+     */
+    public static function summary(): array {
+        return [
+            'fingerprint' => self::generate(),
+            'home_url'    => home_url( '/' ),
+            'site_url'    => site_url( '/' ),
+            'blog_id'     => get_current_blog_id(),
+        ];
+    }
+}

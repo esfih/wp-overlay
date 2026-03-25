@@ -78,6 +78,23 @@ When an app repo needs version-comparison work, it should:
 1. pin the baseline lane first
 2. add the second lane on a different localhost port
 3. keep validation scripts aware of which lane is required versus optional
+
+## Billing & Licensing Architecture (FluentCart + Control-Plane)
+
+For WP SaaS products that need per-site licensing with plan-based feature allowances, this overlay provides a complete 2-plugin template pattern:
+
+- **Architecture guide:** `docs/licensing/BILLING-LICENSING-ARCHITECTURE.md`
+  — auth flow, FluentCart setup, allowances schema, API contract, new-product checklist
+
+- **Control-plane plugin templates:** `templates/licensing/control-plane/`
+  — PHP class templates for the billing site REST API plugin (ActivationCreate, EntitlementResolve, PlanRegistry, FluentCartNativeResolver, BillingAllowanceRepository)
+
+- **Customer plugin licensing module templates:** `templates/licensing/customer-plugin/`
+  — PHP class templates for the customer site plugin (LicenseStateStore, LicenseApiClient, SiteFingerprint)
+
+**Auth model used:** License key → activation → `site_token`. No HMAC shared secret. Billing URL hardcoded in customer plugin. See architecture guide for full rationale.
+
+**Reference implementation:** `private-plugins/wmos-control-plane` (v0.1.40) + `webmasteros` licensing module (v0.1.15) in the WebMasterOS app repo.
 4. document the chosen stable tag and comparison tag in the app-local runtime files
 
 ## Local Migration Rule

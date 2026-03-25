@@ -1,0 +1,43 @@
+<?php
+/**
+ * Registers the public control-plane API namespace used by customer sites.
+ *
+ * TOKENS: {{CP_PHP_NAMESPACE}}, {{CP_PLUGIN_SLUG}}, {{CP_DEV_CONSTANT}}
+ */
+
+declare(strict_types=1);
+
+namespace {{CP_PHP_NAMESPACE}}\API;
+
+use {{CP_PHP_NAMESPACE}}\API\Endpoints\ActivationCreateEndpoint;
+use {{CP_PHP_NAMESPACE}}\API\Endpoints\EntitlementResolveEndpoint;
+use {{CP_PHP_NAMESPACE}}\API\Endpoints\HealthEndpoint;
+use {{CP_PHP_NAMESPACE}}\API\Endpoints\DebugTraceEndpoint;
+
+defined( 'ABSPATH' ) || exit;
+
+final class RestRouter {
+
+    /**
+     * REST namespace: {{CP_PLUGIN_SLUG}}/v1
+     * Full base URL: https://{billing-site}/wp-json/{{CP_PLUGIN_SLUG}}/v1/
+     */
+    public const NAMESPACE = '{{CP_PLUGIN_SLUG}}/v1';
+
+    public function register_routes(): void {
+        $endpoints = [
+            '/health'               => new HealthEndpoint(),
+            '/activations'          => new ActivationCreateEndpoint(),
+            '/entitlements/resolve' => new EntitlementResolveEndpoint(),
+        ];
+
+        // Debug endpoint is only active in dev/staging mode.
+        if ( defined( '{{CP_DEV_CONSTANT}}' ) && (bool) constant( '{{CP_DEV_CONSTANT}}' ) ) {
+            $endpoints['/debug/trace'] = new DebugTraceEndpoint();
+        }
+
+        foreach ( $endpoints as $route => $endpoint ) {
+            \register_rest_route( self::NAMESPACE, $route, $endpoint->route_definition() );
+        }
+    }
+}

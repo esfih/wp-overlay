@@ -1,0 +1,118 @@
+<?php
+/**
+ * Creates a new site activation for a given license key.
+ *
+ * Auth model: license key validated against FluentCart DB via FluentCartNativeResolver.
+ * No HMAC shared secret. The license key IS the activation credential.
+ * After activation, the returned site_token is the per-activation bearer credential.
+ *
+ * TOKENS: {{CP_PHP_NAMESPACE}}
+ */
+
+declare(strict_types=1);
+
+namespace {{CP_PHP_NAMESPACE}}\API\Endpoints;
+
+use {{CP_PHP_NAMESPACE}}\Auth\RequestVerifier;
+use {{CP_PHP_NAMESPACE}}\Modules\Licensing\ActivationRepository;
+use {{CP_PHP_NAMESPACE}}\Modules\Licensing\FluentCartNativeResolver;
+
+defined( 'ABSPATH' ) || exit;
+
+final class ActivationCreateEndpoint {
+
+    public function route_definition(): array {
+        return [
+            'methods'             => \WP_REST_Server::CREATABLE,
+            'callback'            => [ $this, 'handle' ],
+            // Auth is inside handle() so we return JSON errors instead of WP's generic 401.
+            'permission_callback' => [ $this, 'can_access' ],
+            'args'                => [
+                'license_key'      => [ 'required' => true,  'type' => 'string' ],
+                'site_url'         => [ 'required' => true,  'type' => 'string' ],
+                'site_fingerprint' => [ 'required' => true,  'type' => 'string' ],
+                'plugin_version'   => [ 'required' => false, 'type' => 'string' ],
+            ],
+        ];
+    }
+
+    public function can_access( \WP_REST_Request $request ): bool {
+        // Open — auth enforced inside handle()
+        return true;
+    }
+
+    public function handle( \WP_REST_Request $request ): \WP_REST_Response {
+        $license_key = strtoupper( trim( (string) $request->get_param( 'license_key' ) ) );
+        $site_url    = esc_url_raw( (string) $request->get_param( 'site_url' ) );
+        $fingerprint = strtoupper( trim( (string) $request->get_param( 'site_fingerprint' ) ) );
+        $dev_mode    = ( defined( '{{CP_DEV_CONSTANT}}' ) && (bool) constant( '{{CP_DEV_CONSTANT}}' ) );
+
+        // Resolve license key against FluentCart native DB tables.
+        $native = FluentCartNativeResolver::resolve_from_license_key( $license_key );
+
+        if ( $native === [] ) {
+            $probe  = $dev_mode
+                ? FluentCartNativeResolver::debug_probe( $license_key )
+                : [];
+
+            RequestVerifier::log_ops_error( 'invalid_license_key', [
+                'route'           => '/activations',
+                'license_key_ref' => substr( $license_key, 0, 4 ) . '...' . substr( $license_key, -4 ),
+                'key_length'      => strlen( $license_key ),
+                'native_probe'    => $probe,
+                'failure_reason'  => 'no_native_license_match',
+            ] );
+
+            return new \WP_REST_Response(
+                [
+                    'success' => false,
+                    'data'    => [ 'status' => 'invalid_license' ],
+                    'error'   => 'Unable to find this license key in FluentCart native records.',
+                    'code'    => 'no_native_license_match',
+                ],
+                403
+            );
+        }
+
+        $native_max  = (int) ( $native['max_site_activations'] ?? 0 );
+        $max_act     = max( 1, $native_max );
+
+        // Generate activation credentials.
+        $activation_id = 'act_' . wp_generate_password( 20, false, false );
+        $site_token    = 'st_'  . wp_generate_password( 32, false, false );
+        $now           = gmdate( 'c' );
+
+        $repo = new ActivationRepository();
+        $repo->save( $activation_id, [
+            'activation_id'        => $activation_id,
+            'site_token'           => $site_token,
+            'license_key'          => $license_key,
+            'license_key_ref'      => substr( $license_key, 0, 4 ) . '...' . substr( $license_key, -4 ),
+            'license_status'       => 'active',
+            'plan'                 => (string) ( $native['plan'] ?? 'paid' ),
+            'product_id'           => (int) ( $native['product_id'] ?? 0 ),
+            'variation_id'         => (int) ( $native['variation_id'] ?? 0 ),
+            'max_site_activations' => $max_act,
+            'site_url'             => $site_url,
+            'site_fingerprint'     => $fingerprint,
+            'created_at'           => $now,
+            'updated_at'           => $now,
+        ] );
+
+        return new \WP_REST_Response(
+            [
+                'success' => true,
+                'data'    => [
+                    'status'         => 'active',
+                    'activation_id'  => $activation_id,
+                    'site_token'     => $site_token,
+                    'plan'           => (string) ( $native['plan'] ?? 'paid' ),
+                    'product_id'     => (int) ( $native['product_id'] ?? 0 ),
+                    'plugin_version' => (string) $request->get_param( 'plugin_version' ),
+                ],
+                'error' => null,
+            ],
+            200
+        );
+    }
+}

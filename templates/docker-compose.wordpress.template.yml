@@ -15,7 +15,7 @@ services:
       context: .
       dockerfile: foundation/wp/docker/Dockerfile
       args:
-        WORDPRESS_BASE_IMAGE: ${WP_IMAGE:-wordpress:6.9.4-php8.2-apache}
+        WORDPRESS_BASE_IMAGE: ${WP_IMAGE:-wordpress:6.5.0-php8.2-apache}
     restart: unless-stopped
     depends_on:
       db:

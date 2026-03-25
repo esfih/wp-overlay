@@ -1,0 +1,106 @@
+<?php
+/**
+ * Maps FluentCart product_id/variation_id references to plan slugs.
+ *
+ * HOW TO CONFIGURE:
+ * Edit list_paid_product_references() with the actual product IDs from your
+ * FluentCart billing site. Use FluentCartNativeResolver::debug_probe() with
+ * a known license key to discover product_id and variation_id values.
+ *
+ * CUSTOM MAPPINGS OVERRIDE:
+ * Admins can add runtime overrides via WP option {{CP_OPTION_PREFIX}}_plan_mappings_v1
+ * (array of {plan, product_id, variation_id} rows). Useful for testing new products
+ * without deploying code.
+ *
+ * TOKENS: {{CP_PHP_NAMESPACE}}, {{CP_OPTION_PREFIX}}
+ */
+
+declare(strict_types=1);
+
+namespace {{CP_PHP_NAMESPACE}}\Modules\Licensing;
+
+defined( 'ABSPATH' ) || exit;
+
+final class PlanRegistry {
+
+    public const OPTION_PLAN_MAPPINGS = '{{CP_OPTION_PREFIX}}_plan_mappings_v1';
+
+    /**
+     * EDIT THIS: replace product_id and variation_id with your actual FluentCart values.
+     *
+     * product_id  = FluentCart's numeric product identifier (NOT the WP post_id)
+     * variation_id = FluentCart's numeric variation identifier for the pricing tier
+     * plan        = slug used throughout the system, e.g. 'solo', 'maestro', 'agency'
+     *
+     * @return array<int, array{plan:string,product_id:int,variation_id:int}>
+     */
+    public static function list_paid_product_references(): array {
+        $rows = [
+            // TODO: Replace with your actual FluentCart product/variation IDs.
+            [ 'plan' => 'solo',    'product_id' => 0, 'variation_id' => 0 ],
+            [ 'plan' => 'maestro', 'product_id' => 0, 'variation_id' => 0 ],
+            [ 'plan' => 'agency',  'product_id' => 0, 'variation_id' => 0 ],
+        ];
+
+        $rows     = self::merge_rows_with_custom_mappings( $rows );
+        $filtered = \apply_filters( '{{CP_OPTION_PREFIX}}_paid_product_references', $rows );
+        if ( ! is_array( $filtered ) ) {
+            $filtered = $rows;
+        }
+
+        // Deduplicate by product_id:variation_id key.
+        $normalized = [];
+        $seen       = [];
+        foreach ( $filtered as $item ) {
+            if ( ! is_array( $item ) ) {
+                continue;
+            }
+            $plan         = sanitize_key( (string) ( $item['plan'] ?? '' ) );
+            $product_id   = (int) ( $item['product_id'] ?? 0 );
+            $variation_id = (int) ( $item['variation_id'] ?? 0 );
+            if ( $plan === '' || $product_id <= 0 ) {
+                continue;
+            }
+            $key = $product_id . ':' . max( 0, $variation_id );
+            if ( isset( $seen[ $key ] ) ) {
+                continue;
+            }
+            $seen[ $key ]   = true;
+            $normalized[]   = [ 'plan' => $plan, 'product_id' => $product_id, 'variation_id' => max( 0, $variation_id ) ];
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * @return array<string, mixed>   Empty array when no match found.
+     */
+    public static function resolve_from_product_reference( int $product_id, int $variation_id = 0 ): array {
+        foreach ( self::list_paid_product_references() as $ref ) {
+            if ( (int) $ref['product_id'] !== $product_id ) {
+                continue;
+            }
+            if ( $variation_id > 0 && (int) $ref['variation_id'] !== $variation_id ) {
+                continue;
+            }
+            return [
+                'plan'         => $ref['plan'],
+                'product_id'   => $ref['product_id'],
+                'variation_id' => $ref['variation_id'],
+            ];
+        }
+        return [];
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $base
+     * @return array<int, array<string, mixed>>
+     */
+    private static function merge_rows_with_custom_mappings( array $base ): array {
+        $custom = get_option( self::OPTION_PLAN_MAPPINGS, [] );
+        if ( ! is_array( $custom ) || $custom === [] ) {
+            return $base;
+        }
+        return array_merge( $base, $custom );
+    }
+}

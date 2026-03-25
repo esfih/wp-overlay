@@ -1,0 +1,220 @@
+<?php
+/**
+ * Control-plane activation and entitlement sync client.
+ *
+ * LIFECYCLE:
+ * 1. sync() is called on admin page loads and a scheduled cron hook.
+ * 2. If no activation_id + site_token are stored, activate() is called first.
+ * 3. activate() calls POST /activations with the license key.
+ * 4. On success, activation_id and site_token are stored.
+ * 5. POST /entitlements/resolve is called with site_token in header.
+ * 6. The returned contract is stored and used for all feature gates.
+ *
+ * WIRING EXAMPLE (in your plugin's main file or boot class):
+ *
+ *   // Hourly cron sync
+ *   add_action( 'myplugin_license_hourly_sync', function() {
+ *       ( new LicenseApiClient() )->sync( 'cron' );
+ *   });
+ *   if ( ! wp_next_scheduled( 'myplugin_license_hourly_sync' ) ) {
+ *       wp_schedule_event( time(), 'hourly', 'myplugin_license_hourly_sync' );
+ *   }
+ *
+ *   // Sync on license key save (in your settings page save handler)
+ *   ( new LicenseApiClient() )->sync( 'settings_save' );
+ *
+ * FEATURE GATE EXAMPLE:
+ *
+ *   $store = new LicenseStateStore();
+ *   if ( $store->is_active() && $store->get_plan_slug() !== 'free' ) {
+ *       // show paid feature
+ *   }
+ *
+ * TOKENS TO REPLACE:
+ *   {{CUSTOMER_PHP_NAMESPACE}}    - PHP namespace
+ *   {{CUSTOMER_VERSION_CONSTANT}} - e.g. "MYPLUGIN_VERSION"
+ */
+
+namespace {{CUSTOMER_PHP_NAMESPACE}};
+
+defined( 'ABSPATH' ) || exit;
+
+final class LicenseApiClient {
+
+    private const DEFAULT_TIMEOUT_SECONDS = 12;
+
+    private LicenseStateStore $store;
+
+    public function __construct( ?LicenseStateStore $store = null ) {
+        $this->store = $store ?? new LicenseStateStore();
+    }
+
+    /**
+     * Main entry point — calls activate() if needed, then resolves entitlement.
+     *
+     * @param string $reason  Label for debug events: 'runtime', 'cron', 'settings_save', 'admin_load'
+     */
+    public function sync( string $reason = 'runtime' ): bool {
+        $license_key = $this->store->get_license_key();
+        if ( $license_key === '' ) {
+            return false;
+        }
+
+        $license_ref  = $this->mask_license_key( $license_key );
+        $base_url     = $this->store->get_control_plane_base_url();
+        $activation_id = $this->store->get_activation_id();
+        $site_token   = $this->store->get_site_token();
+        $bound_license = $this->store->get_activation_license_ref();
+
+        // License key changed — clear stale activation.
+        if ( $bound_license !== '' && $bound_license !== $license_ref ) {
+            $this->store->clear_remote_state();
+            $activation_id = '';
+            $site_token    = '';
+        }
+
+        // Activate if not already activated.
+        if ( $activation_id === '' || $site_token === '' ) {
+            if ( ! $this->activate( $base_url, $license_key, $license_ref ) ) {
+                return false;
+            }
+            $activation_id = $this->store->get_activation_id();
+            $site_token    = $this->store->get_site_token();
+        }
+
+        if ( $activation_id === '' || $site_token === '' ) {
+            return false;
+        }
+
+        // Resolve entitlement contract.
+        $payload = [
+            'activation_id'    => $activation_id,
+            'site_fingerprint' => SiteFingerprint::generate(),
+            'plugin_version'   => defined( '{{CUSTOMER_VERSION_CONSTANT}}' ) ? constant( '{{CUSTOMER_VERSION_CONSTANT}}' ) : 'unknown',
+            'reason'           => $reason,
+        ];
+
+        $response = $this->post_json( trailingslashit( $base_url ) . 'entitlements/resolve', $payload, $site_token );
+        if ( is_wp_error( $response ) ) {
+            $this->store->set_last_error(
+                sprintf( __( 'Entitlement sync failed: %s', '{{CUSTOMER_PLUGIN_TEXTDOMAIN}}' ), $response->get_error_message() )
+            );
+            return false;
+        }
+
+        $status = (int) wp_remote_retrieve_response_code( $response );
+        $body   = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+
+        if ( $status < 200 || $status >= 300 || ! is_array( $body ) || empty( $body['success'] ) || ! is_array( $body['data'] ?? null ) ) {
+            $this->store->set_last_error( $this->format_cp_error(
+                __( 'Entitlement sync rejected by control plane.', '{{CUSTOMER_PLUGIN_TEXTDOMAIN}}' ),
+                $status, $body
+            ) );
+            return false;
+        }
+
+        $this->store->set_cached_entitlement( $this->normalize_contract( (array) $body['data'] ) );
+        $this->store->set_last_sync( gmdate( 'c' ) );
+        $this->store->set_last_error( '' );
+
+        return true;
+    }
+
+    // ── Private ──────────────────────────────────────────────────────────────
+
+    private function activate( string $base_url, string $license_key, string $license_ref ): bool {
+        $payload = [
+            'license_key'      => $license_key,
+            'site_url'         => site_url( '/' ),
+            'site_fingerprint' => SiteFingerprint::generate(),
+            'plugin_version'   => defined( '{{CUSTOMER_VERSION_CONSTANT}}' ) ? constant( '{{CUSTOMER_VERSION_CONSTANT}}' ) : 'unknown',
+        ];
+
+        // No site_token on activation — license key is the credential.
+        $response = $this->post_json( trailingslashit( $base_url ) . 'activations', $payload, '' );
+        if ( is_wp_error( $response ) ) {
+            $this->store->set_last_error(
+                sprintf( __( 'Activation failed: %s', '{{CUSTOMER_PLUGIN_TEXTDOMAIN}}' ), $response->get_error_message() )
+            );
+            return false;
+        }
+
+        $status = (int) wp_remote_retrieve_response_code( $response );
+        $body   = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+
+        if ( $status < 200 || $status >= 300 || ! is_array( $body ) || empty( $body['success'] ) || ! is_array( $body['data'] ?? null ) ) {
+            $this->store->set_last_error( $this->format_cp_error(
+                __( 'License activation was rejected.', '{{CUSTOMER_PLUGIN_TEXTDOMAIN}}' ),
+                $status, $body
+            ) );
+            return false;
+        }
+
+        $data = $body['data'];
+        $this->store->set_activation_id( (string) ( $data['activation_id'] ?? '' ) );
+        $this->store->set_site_token( (string) ( $data['site_token'] ?? '' ) );
+        $this->store->set_activation_license_ref( $license_ref );
+
+        return true;
+    }
+
+    /**
+     * Normalize the contract returned by the control-plane into the shape used
+     * throughout the customer plugin. Extend this method for new limit keys.
+     *
+     * @param  array<string, mixed> $contract
+     * @return array<string, mixed>
+     */
+    private function normalize_contract( array $contract ): array {
+        $plan   = (string) ( $contract['plan'] ?? 'free' );
+        $limits = (array) ( $contract['limits'] ?? [] );
+        $policy = (array) ( $contract['activation_policy'] ?? [] );
+
+        return [
+            'plan_slug'           => $plan,
+            'status'              => (string) ( $contract['status'] ?? 'inactive' ),
+            'limits'              => $limits,
+            'activation_policy'   => $policy,
+            'contract_signature'  => (string) ( $contract['contract_signature'] ?? '' ),
+            'normalized_at'       => gmdate( 'c' ),
+        ];
+    }
+
+    private function post_json( string $url, array $payload, string $site_token, int $timeout = self::DEFAULT_TIMEOUT_SECONDS ) {
+        $json    = (string) wp_json_encode( $payload );
+        $headers = [ 'Content-Type' => 'application/json' ];
+
+        if ( $site_token !== '' ) {
+            // Header name must match what the control-plane reads.
+            // WP normalises 'X-WMOS-Site-Token' → header key 'x_wmos_site_token' on server side.
+            // REPLACE {{CP_SITE_TOKEN_HTTP_HEADER}} with your actual header name, e.g. 'X-WMOS-Site-Token'
+            $headers['{{CP_SITE_TOKEN_HTTP_HEADER}}'] = $site_token;
+        }
+
+        return wp_remote_post( $url, [
+            'timeout' => max( 1, $timeout ),
+            'headers' => $headers,
+            'body'    => $json,
+        ] );
+    }
+
+    private function format_cp_error( string $base_message, int $status, $body ): string {
+        if ( $status === 0 ) {
+            return $base_message;
+        }
+        $cp_error = '';
+        if ( is_array( $body ) ) {
+            $cp_error = (string) ( $body['error'] ?? $body['message'] ?? '' );
+        }
+        return $cp_error !== ''
+            ? sprintf( '%s (HTTP %d: %s)', $base_message, $status, $cp_error )
+            : sprintf( '%s (HTTP %d)', $base_message, $status );
+    }
+
+    private function mask_license_key( string $key ): string {
+        if ( strlen( $key ) < 8 ) {
+            return '****';
+        }
+        return substr( $key, 0, 4 ) . '...' . substr( $key, -4 );
+    }
+}
