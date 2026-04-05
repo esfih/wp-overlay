@@ -249,3 +249,86 @@ When working in this repository, the concrete values are:
 - DB env vars: `DB7_NAME`, `DB7_USER`, `DB7_PASSWORD`
 
 See `DEVOPS-TECH-STACK.md` for the full local baseline summary.
+
+
+---
+
+## WordPress Plugin Release — Correctness Rules
+
+These rules apply to any WordPress plugin distributed via a self-hosted or GitHub-backed update server.
+
+### Version fields — both must match before tagging
+
+A WordPress plugin has two version declarations that must always be identical:
+
+```php
+ * Version: 1.2.3          ← Plugin header (read by WordPress to display installed version)
+
+define( 'MY_PLUGIN_VERSION', '1.2.3' );  ← PHP constant (used by migration guards, update checks)
+```
+
+**Verify before committing:**
+```bash
+grep -E '^ \* Version:|MY_PLUGIN_VERSION' plugin-slug/plugin-slug.php | head -2
+```
+
+If the constant lags the header, the plugin's migration guard (`version_compare( $stored, MY_PLUGIN_VERSION, '>=' )`) will see the versions as equal and skip all install/upgrade logic silently.
+
+### Tag must point to the version-bumped commit
+
+The correct order is always:
+1. Bump both version fields in the same commit
+2. Get the commit SHA (`git rev-parse HEAD`)
+3. Create the release tag on THAT SHA
+
+Creating the tag before the commit embeds the wrong version in the release.
+
+### Release zip must be attached to the GitHub release
+
+A GitHub release created without a zip asset causes WordPress auto-update to fall back to the GitHub **source-code archive** URL. That archive extracts to `plugin-slug-1.2.3/` instead of `plugin-slug/` — WordPress cannot find the plugin header and reports: *"The package could not be installed."*
+
+Always attach the built zip in the same `gh release create` command:
+```bash
+gh release create v1.2.3 dist/plugin-slug-1.2.3.zip --title "Release v1.2.3" --notes "..."
+```
+
+---
+
+## WordPress Auto-Update — Ownership and `clear_destination`
+
+### Why manual upload succeeds but auto-update fails
+
+WordPress has two distinct installation paths:
+
+| Path | Trigger | `clear_destination` | Behaviour |
+|---|---|---|---|
+| `install()` | Manual upload via wp-admin / plugin-install.php | `false` | Overlays files onto existing directory — does NOT need to delete it |
+| `upgrade()` | WordPress auto-update | `true` | **Must delete the old plugin directory first**, then place the new one |
+
+When `upgrade()` cannot delete the old directory — because PHP does not own it — it fails with:
+```
+Warning: Could not remove the old plugin.
+```
+WordPress surfaces this as *"The package could not be installed."*
+
+### Root cause on mutualized / shared hosting
+
+The plugin directory is owned by `root` (deployed via SSH/SFTP as a privileged user) but PHP runs as the hosting account user (e.g., `www-data`, or the account username on N0C/cPanel hosts). PHP can read but not delete root-owned directories.
+
+### Fix
+
+SSH into the server and set ownership to the PHP process user:
+```bash
+# cPanel / generic shared hosting (PHP typically runs as www-data):
+chown -R www-data:www-data /path/to/wp-content/plugins/plugin-slug
+
+# N0C mutualized hosting (PHP runs as the account user, not www-data):
+chown -R <account-user> /path/to/wp-content/plugins/plugin-slug
+```
+
+Confirm the PHP user with: `ps aux | grep php | head -3`
+
+### Prevention
+
+When deploying a plugin for the first time via SSH/SFTP, always correct ownership immediately after the copy — before the first auto-update is ever attempted.
+
