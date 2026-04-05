@@ -104,3 +104,14 @@ During staging inside this repository:
 - add reusable WordPress assets here first
 - keep current root/runtime files authoritative until adapters are in place
 - do not move product plugin code into this folder
+## Documentation Index
+
+Guides available under `docs/`:
+
+| File | Contents |
+|---|---|
+| `WP-LOCAL-OPS.md` | Local Docker WordPress setup, WP-CLI usage, plugin release correctness rules, auto-update ownership fix |
+| `WP-REMOTE-OPS.md` | SSH connection variables, `wp-remote.sh` wrapper pattern, remote WP-CLI diagnostics, debug log, ownership, SCP |
+| `WP-PLAYWRIGHT-SELFTEST.md` | Playwright IDE AI self-test harness — setup, catalog commands, smoke/interaction/debug flows, scenario format, Shadow DOM, triage |
+| `CONTROL-PLANE-REUSE-GUIDE.md` | Control-plane plugin pattern for per-site licensing (FluentCart + activation REST API) |
+| `licensing/BILLING-LICENSING-ARCHITECTURE.md` | Auth flow, FluentCart setup, allowances schema, full billing architecture reference |
